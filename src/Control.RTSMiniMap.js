@@ -412,7 +412,11 @@ L.Control.RTSMiniMap = L.Control.extend({
 		}
 
 		// Clear the view
-		ctx.clearRect(0, 0, ctxWidth, ctxHeight);
+		ctx.globalCompositeOperation = 'source-over';
+
+		var start = this._miniMap.containerPointToLayerPoint(L.point(0,0));
+
+		ctx.clearRect(start.x, start.y, ctxWidth, ctxHeight);
 
 		// Compute the view bounds
 		var view = this._mainMap.getBounds(),
@@ -423,13 +427,12 @@ L.Control.RTSMiniMap = L.Control.extend({
 
 
 		ctx.fillStyle = 'rgba(0,0,0,0.33)'
-		ctx.fillRect(0, 0, ctxWidth, ctxHeight);
+		ctx.fillRect(start.x, start.y, ctxWidth, ctxHeight);
 		if (this._miniMap.getBounds().intersects(view) 
 				&& viewWidth * viewHeight >= 16) {
 			ctx.fillStyle = 'black';
 			ctx.shadowBlur = 6;
 			ctx.shadowColor = 'rgba(0,0,0,0.5)';
-			ctx.globalCompositeOperation = 'source-over';
 			ctx.fillRect(viewMin.x, viewMin.y, viewWidth, viewHeight);
 		
 			ctx.clearRect(viewMin.x, viewMin.y, viewWidth, viewHeight);

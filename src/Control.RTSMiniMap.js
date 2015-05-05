@@ -8,11 +8,8 @@ L.Control.RTSMiniMap = L.Control.extend({
 		autoToggleDisplay: false,
 		width: 150,
 		height: 150,
-		aimingRectOptions: {
-			color: "#ff7800",
-			weight: 1,
-			clickable: false
-		},
+		touchEventMargin: 8,
+		clickEventMargin: 4
 	},
 
 	hideText: 'Hide MiniMap',
@@ -20,7 +17,7 @@ L.Control.RTSMiniMap = L.Control.extend({
 	showText: 'Show MiniMap',
 
 	clear: function() {
-		this._canvasLayer._points = [];
+		this._points = [];
 		this._canvasLayer.redraw();
 	},
 
@@ -34,16 +31,16 @@ L.Control.RTSMiniMap = L.Control.extend({
 		} else {
 			point._pixelColor = {r:255,v:0,b:0,a:128};
 		}
-		this._canvasLayer._points.push(point);
+		this._points.push(point);
 	},
 
 	render: function() {
-		if (this._canvasLayer._points.length) {
+		if (this._points.length) {
 			if (!this._animatedRender) {
-				this._miniMap.fitBounds(this._canvasLayer._points, {animate:false});
+				this._miniMap.fitBounds(this._points, {animate:false});
 				this._animatedRender = true;
 			} else {
-				this._miniMap.fitBounds(this._canvasLayer._points);
+				this._miniMap.fitBounds(this._points);
 			}
 		}
 		// Sometimes the fitBounds doesn't change the view
@@ -55,11 +52,10 @@ L.Control.RTSMiniMap = L.Control.extend({
 	initialize: function(layer, options) {
 		L.Util.setOptions(this, options);
 		//Make sure the aiming rects are non-clickable even if the user tries to set them clickable (most likely by forgetting to specify them false)
-		this.options.aimingRectOptions.clickable = false;
 		this._layer = layer;
 
 
-
+		this._points = [];
 	},
 
 	onAdd: function(map) {
@@ -82,13 +78,29 @@ L.Control.RTSMiniMap = L.Control.extend({
 			scrollWheelZoom: false,
 			doubleClickZoom: false,
 			boxZoom: false,
-			crs: map.options.crs
+			crs: map.options.crs,
+			fadeAnimation: false,
+			zoomAnimation: false,
+			markerZoomAnimation: false
 		});
 
 		this._miniMap.addLayer(this._layer);
-		this._canvasLayer = new L.control.minimap.pixelsView();
-		this._canvasLayer._miniMap = this._miniMap;
-		this._canvasLayer._points = [];
+
+		this._canvasLayer = L.canvas();
+
+		var redrawRequest = null;
+		var redrawWorker = L.Util.bind(function() {
+			redrawRequest = null;
+			this._drawMinimap();
+		}, this);
+
+		this._canvasLayer.redraw = L.Util.throttle(function() {
+			redrawRequest = redrawRequest ||
+				L.Util.requestAnimFrame(redrawWorker);
+		}, 200);
+
+
+		// this._canvasLayer.drawTile = L.Util.bind(this._drawTile, this);
 		this._miniMap.addLayer(this._canvasLayer);
 
 		//Keep a record of this to prevent auto toggling when the user explicitly doesn't want it.
@@ -102,18 +114,49 @@ L.Control.RTSMiniMap = L.Control.extend({
 		this._animatedRender = false;
 
 		this._miniMap.whenReady(L.Util.bind(function() {
-			this._aimingRect = L.rectangle(this._mainMap.getBounds(), this.options.aimingRectOptions).addTo(this._miniMap);
 			this._mainMap.on('move', this._onMainMapMoving, this);
+			this._miniMap.on('contextmenu', function(e) {
+			});
 
+			this._miniMap.on('viewreset', function() {
+				this._forceProjection = true;
+				//console.log("lapin");
+			}, this);
+
+			var mouseMoveWorkerId = null,
+				lastMouseEvent = null,
+				mouseMoveWorker = L.Util.bind(function() {
+					mouseMoveWorkerId = null;
+					this._onMiniMapDrag(lastMouseEvent);
+				}, this);
+
+			var throttledMouseMove = function(e) {
+				L.DomEvent.stopPropagation(e);
+				lastMouseEvent = e;
+				mouseMoveWorkerId = mouseMoveWorkerId || 
+					L.Util.requestAnimFrame(mouseMoveWorker);
+			};
 			this._miniMap.on('mousedown', function(e) {
 				this._onMiniMapClick(e);
+				L.DomUtil.disableTextSelection();
 				L.DomUtil.addClass(this._container, 'mousedown');
-				this._miniMap.on('mousemove', this._onMiniMapClick, this);
+				this._stooop = false;
+				L.DomEvent.on(this._container, 'mousemove touchmove', throttledMouseMove);
 			}, this);
-			this._miniMap.on('mouseup', function() {
+			this._miniMap.on('mouseup mouseout', function() {
+				L.DomUtil.enableTextSelection();
 				L.DomUtil.removeClass(this._container, 'mousedown');
-				this._miniMap.off('mousemove', this._onMiniMapClick, this);
+				L.DomEvent.off(this._container, 'mousemove touchmove', throttledMouseMove);
+				//if (this._stickIntervalId) {
+				L.Util.cancelAnimFrame(this._stickIntervalId);	
+				this._stooop = true;
+				//}
 			}, this);
+			/*this._miniMap.on('mouseout', L.Util.bind(function() {
+				if (this._stickIntervalId) {
+					window.clearInterval(this._stickIntervalId);	
+				}
+			}, this));*/
 
 
 		}, this));
@@ -203,13 +246,134 @@ L.Control.RTSMiniMap = L.Control.extend({
 	},
 
 	_onMainMapMoving: function(e) {
-		this._aimingRect.setBounds(this._mainMap.getBounds());
+		this._canvasLayer.redraw();
 	},
 
 	_onMiniMapClick: function(e) {
-		this._mainMap.setView(e.latlng, this._mainMap.getZoom(), {
+		var margin = e.type.indexOf("mouse") !== 0 ?
+			this.options.touchEventMargin :
+			this.options.clickEventMargin;
+
+		margin = 10;
+		var topLeft = e.containerPoint.clone(),
+			bottomright = e.containerPoint.clone();
+
+		topLeft.x -= margin;
+		topLeft.y -= margin;
+
+		bottomright.x += margin;
+		bottomright.y += margin;
+
+		var bounds = new L.LatLngBounds(
+			this._miniMap.containerPointToLatLng(topLeft),
+			this._miniMap.containerPointToLatLng(bottomright));
+
+		var center;
+
+		if (e.latlng) {
+			center = e.latlng;
+		} else {
+			center = this._miniMap.containerPointToLatLng(e.containerPoint);
+		}
+
+		//console.log(e.containerPoint);
+		this._lastClickPosition = e.containerPoint;
+
+		var average = new L.LatLng(0,0);
+
+		var cpt = 0;
+		for (var i = 0, points = this._points, l = points.length; i < l; ++i) {
+			var p = points[i];
+
+			if (bounds.contains(p)) {
+				//++cpt;
+				var distance = Math.sqrt((p.lat - center.lat) * (p.lat - center.lat) +
+					(p.lng - center.lng) * (p.lng - center.lng));
+				var invDistance = 1/distance || 1;
+				average.lat += p.lat * invDistance;
+				average.lng += p.lng * invDistance;
+				cpt += invDistance;
+			}
+		}
+
+		if (cpt>0) {
+
+			average.lat /= cpt;
+			average.lng /= cpt;
+			center = average;
+		}
+
+		/*var center;
+		if (cpt > 0) {
+			average.lat /= cpt;
+			average.lng /= cpt;
+			center = average;
+		} else if (e.latlng) {
+			center = e.latlng;
+		} else {
+			center = this._miniMap.containerPointToLatLng(e.containerPoint);
+		}*/
+
+		
+
+
+		this._mainMap.setView(center, this._mainMap.getZoom(), {
 			animate: false
 		});
+	},
+
+	_onMiniMapDrag: function(e) {
+		if (e.touches) {
+			if (e.touches.length !== 1) {
+				return;
+			}
+
+			var first = e.touches[0];
+			e.clientX = first.clientX;
+			e.clientY = first.clientY;
+
+		}
+
+		e.containerPoint = this._miniMap.mouseEventToContainerPoint(e);
+
+		var diff = e.containerPoint.subtract(this._lastClickPosition);
+		
+		var coefX = diff.x / this.options.width,
+			coefY = diff.y / this.options.height;
+		
+		var powCoefX = coefX * (1+Math.abs(coefX)*0.3),
+			powCoefY = coefY * (1+Math.abs(coefY)*0.3);
+
+		var speed = 100;
+
+		//if (this._stickIntervalId) {
+		L.Util.cancelAnimFrame(this._stickIntervalId);	
+		//}
+		
+		var obj = this;
+		this._stickIntervalId = L.Util.requestAnimFrame(function roger() {
+			obj._mainMap.panBy(L.point(
+				speed * powCoefX,
+				speed * powCoefY
+			), {
+				animate: false
+			});
+			if (!obj._stooop && obj._mainMap.getBounds().intersects(obj._miniMap.getBounds())) {
+				obj._stickIntervalId =  L.Util.requestAnimFrame(roger);	
+			}
+		}, 20);
+		/*if (e.containerPoint.x > this.options.width/2) {
+			this._lastClickPosition.x = Math.ceil(this.options.width/2);
+		}
+
+		if (e.containerPoint.y > this.options.height/2) {
+			this._lastClickPosition.y = Math.ceil(this.options.height/2);
+		}*/
+
+		//console.log(powCoefX, powCoefY);
+		//this._lastClickCenter = e.containerPoint;
+		
+		//this._onMiniMapClick(e);
 	},
 
 	_onMouseWheel: function(e) {
@@ -235,6 +399,63 @@ L.Control.RTSMiniMap = L.Control.extend({
 		}
 
 		return this._minimized;
+	},
+
+	_drawMinimap: function() {
+		var canvasLayer = this._canvasLayer,
+			ctx = canvasLayer._ctx,
+			ctxWidth = ctx.canvas.width,
+			ctxHeight = ctx.canvas.height;
+
+		if (ctxWidth === 0 || ctxHeight === 0) {
+			return;
+		}
+
+		// Clear the view
+		ctx.clearRect(0, 0, ctxWidth, ctxHeight);
+
+		// Compute the view bounds
+		var view = this._mainMap.getBounds(),
+			viewMax = this._miniMap.latLngToLayerPoint(view.getSouthEast()),
+			viewMin = this._miniMap.latLngToLayerPoint(view.getNorthWest()),
+			viewWidth = viewMax.x - viewMin.x,
+			viewHeight = viewMax.y - viewMin.y;
+
+
+		ctx.fillStyle = 'rgba(0,0,0,0.33)'
+		ctx.fillRect(0, 0, ctxWidth, ctxHeight);
+		if (this._miniMap.getBounds().intersects(view) 
+				&& viewWidth * viewHeight >= 16) {
+			ctx.fillStyle = 'black';
+			ctx.shadowBlur = 6;
+			ctx.shadowColor = 'rgba(0,0,0,0.5)';
+			ctx.globalCompositeOperation = 'source-over';
+			ctx.fillRect(viewMin.x, viewMin.y, viewWidth, viewHeight);
+		
+			ctx.clearRect(viewMin.x, viewMin.y, viewWidth, viewHeight);
+			ctx.shadowBlur = 0;
+		}
+
+		var canvasData = ctx.getImageData(0, 0, ctxWidth, ctxHeight),
+			data = canvasData.data;
+
+		// Draw the points in a oldschool way (ctx.fillRect is not fun enough)
+		for (var i = 0, points = this._points, l = points.length; i < l; ++i) {
+			var p = points[i];
+			var color = p._pixelColor;
+
+			if (this._forceProjection || !p._pos) {
+				p._pos = this._miniMap.latLngToLayerPoint(p);
+			}
+
+			var pos = p._pos;
+	
+			ctx.fillStyle = color;
+			ctx.fillRect(pos.x-1, pos.y-1, 2, 2);
+
+		}
+
+		this._forceProjection = false;
 	}
 });
 
@@ -251,63 +472,3 @@ L.Map.addInitHook(function() {
 L.control.minimap = function(options) {
 	return new L.Control.MiniMap(options);
 };
-
-L.control.minimap.pixelsView = L.CanvasLayer.extend({
-	render: function() {
-		var canvas = this.getCanvas(),
-			ctx = canvas.getContext('2d'),
-			ctxWidth = canvas.width,
-			ctxHeight = canvas.height;
-
-		// Clear the view
-		ctx.clearRect(0, 0, ctxWidth, ctxHeight);
-		// ctx.fillStyle = 'rgba(0,0,0,0.1)'
-		// ctx.fillRect(0, 0, ctxWidth, ctxHeight);
-
-		var canvasData = this._ctx.getImageData(0, 0, ctxWidth, ctxHeight),
-			data = canvasData.data;
-
-		// Draw the points in a oldschool way (ctx.fillRect is not fun enough)
-		var points = this._points;
-		for (var i = 0, l = points.length; i < l; ++i) {
-			var p = points[i];
-			var pos = this._miniMap.latLngToContainerPoint(p);
-			var color = p._pixelColor;
-
-			var x = pos.x,
-				y = pos.y;
-
-			var pixel = (x + y * ctxWidth) * 4;
-
-			data[pixel] = color.r;
-			data[pixel + 1] = color.g;
-			data[pixel + 2] = color.b;
-			data[pixel + 3] = Math.min(color.a + data[pixel + 3], 255);
-
-			if (x < ctxWidth) {
-				pixel += 4;
-				data[pixel] = color.r;
-				data[pixel + 1] = color.g;
-				data[pixel + 2] = color.b;
-				data[pixel + 3] = Math.min(color.a + data[pixel + 3], 255);
-			}
-
-			if (y < ctxHeight) {
-				pixel += ctxHeight * 4 - 4;
-				data[pixel] = color.r;
-				data[pixel + 1] = color.g;
-				data[pixel + 2] = color.b;
-				data[pixel + 3] = Math.min(color.a + data[pixel + 3], 255);
-				if (x < ctxWidth) {
-					pixel += 4;
-					data[pixel] = color.r;
-					data[pixel + 1] = color.g;
-					data[pixel + 2] = color.b;
-					data[pixel + 3] = Math.min(color.a + data[pixel + 3], 255);
-				}
-			}
-		}
-
-		ctx.putImageData(canvasData, 0, 0);
-	}
-});
